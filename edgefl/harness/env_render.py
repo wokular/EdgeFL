@@ -83,6 +83,15 @@ def render_node_env(
     # valid (config validation enforces that).
     env["COLD_START"] = str(config.cold_start and is_dfl and identity.index == 1)
 
+    # rollback. auto-rollback is CFL-only (config validation enforces that), so DFL
+    # nodes in a hybrid run get it forced off rather than inheriting the run setting.
+    env["ROLLBACK_ENABLED"] = str(config.rollback_enabled)
+    env["ROLLBACK_AUTO_ENABLED"] = str(config.rollback_auto_enabled and not is_dfl)
+    env["ROLLBACK_PATIENCE_ROUNDS"] = str(config.rollback_patience_rounds)
+    env["ROLLBACK_MIN_DELTA"] = str(config.rollback_min_delta)
+    env["ROLLBACK_ALLOW_MANUAL"] = str(config.rollback_allow_manual)
+    env["ROLLBACK_LOG_EVENTS"] = str(config.rollback_log_events)
+
     # benchmarking: all nodes stream metrics to operator1's REST endpoint, which writes
     # to the benchmarkfl sqlite db (the benchmark team's pipeline).
     node1 = node_identities(1)[0]

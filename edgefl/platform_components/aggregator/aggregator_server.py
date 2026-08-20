@@ -399,15 +399,20 @@ async def update_minParams(request: UpdatedMinParamsRequest):
         )
 
 
-def _node_id_from_params_link(link):
-    """Numeric node id parsed from a submodel path '{round}-{name}_update.json',
-    or None if the name carries no digits."""
+def _node_id_from_name(node_name):
+    """Numeric node id parsed from a policy's node name ('node2' -> 2), or -1 if the
+    name carries no digits."""
+    digits = "".join(c for c in str(node_name) if c.isdigit())
+    return int(digits) if digits else -1
+
+
+def _as_float(value):
+    """Blockchain policy values come back as strings even when inserted as numbers —
+    every other reader in this codebase casts (int(policy['round_number']),
+    float(row['final_accuracy'])). None if the value can't be read as a number."""
     try:
-        stem = os.path.basename(link).split("_update")[0]   # e.g. "3-node2"
-        name = stem.split("-", 1)[1]                        # "node2"
-        digits = "".join(c for c in name if c.isdigit())
-        return int(digits) if digits else None
-    except Exception:
+        return float(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -419,9 +424,13 @@ async def listen_for_update_agg(min_params, round_number, index):
     # TODO: update min_params here with aggregator.min_params since the update_minParams request doesn't affect here
     #  as of now
     decoded_params = {} # { 'node_params_link': 'decoded_param' }
-    # Submodel arrival times keyed like decoded_params, at the poll loop's ~2s
-    # resolution — feeds first_to_last_arrival_s and straggling_node_id.
-    arrival_ts = {}
+    # Benchmarking: straggler tracking is driven by each node's self-reported
+    # published_ts (written into its submodel policy by Node.add_node_params), not by
+    # when this loop happened to fetch the params. Timing at fetch measures this
+    # aggregator's poll cadence, not node lateness, and collapses to ~0s whenever
+    # several nodes land in the same poll.
+    publish_ts_by_link = {} # { node_params_link: node-reported published_ts }
+    link_to_node = {}       # { node_params_link: node_name }
     check_chances = 5 # Once this reaches <= 0, we will ignore min_params and handle accordingly
     while True:
         try:
@@ -453,8 +462,25 @@ async def listen_for_update_agg(min_params, round_number, index):
                     if index in item
                 ]
 
+                # Benchmarking: carry each policy's node name and published_ts alongside
+                # its params link so the straggler can be identified after aggregation.
+                node_names = [
+                    item.get(index).get('node')
+                    for item in result
+                    if index in item
+                ]
+                published_ts_list = [
+                    item.get(index).get('published_ts')
+                    for item in result
+                    if index in item
+                ]
+                link_to_node.update(dict(zip(node_params_links, node_names)))
+                for link, ts in zip(node_params_links, published_ts_list):
+                    ts = _as_float(ts)
+                    if ts is not None:
+                        publish_ts_by_link[link] = ts
+
                 # Updates decoded_params with newly fetched decoded params (with node link as key)
-                already_fetched = set(decoded_params)
                 aggregator.fetch_decoded_params(
                     decoded_params_dict=decoded_params,
                     node_param_download_links=node_params_links,
@@ -462,23 +488,46 @@ async def listen_for_update_agg(min_params, round_number, index):
                     rest_ip_ports=rest_ip_ports,
                     index=index
                 )
-                now = time.time()
-                for link in set(decoded_params) - already_fetched:
-                    arrival_ts[link] = now
 
             # If enough parameters or not getting ALL parameters in time, get the URL
             if len(decoded_params) >= min_params or (decoded_params and not check_chances):
                 benchmarker = get_benchmarker()
-                if len(arrival_ts) >= 2:
-                    first_link = min(arrival_ts, key=arrival_ts.get)
-                    last_link = max(arrival_ts, key=arrival_ts.get)
+                # Guarded as a whole: this sits on the aggregation critical path, and
+                # the enclosing `except` only retries the poll loop — an error escaping
+                # here would spin forever instead of aggregating. Benchmarking must
+                # never be able to stall a round.
+                try:
+                    # Consider only params that actually arrived and carried a usable
+                    # timestamp. Nodes on a pre-published_ts build are simply absent.
+                    arrived = {
+                        link: publish_ts_by_link[link]
+                        for link in decoded_params
+                        if link in publish_ts_by_link
+                    }
+                    if len(arrived) >= 2:
+                        straggler_link = max(arrived, key=arrived.get)
+                        first_to_last_arrival_s = arrived[straggler_link] - min(arrived.values())
+                    else:
+                        # Single node, or no timestamps available (older node build).
+                        straggler_link = next(iter(decoded_params), None)
+                        first_to_last_arrival_s = 0.0
+
+                    straggler_node = link_to_node.get(straggler_link, "unknown")
+                    straggling_node_id = _node_id_from_name(straggler_node)
+                    logger.info(
+                        f"[{index}][Round {round_number}] Benchmarker: "
+                        f"first->last arrival = {first_to_last_arrival_s:.3f}s, "
+                        f"straggler = {straggler_node} (id={straggling_node_id})"
+                    )
                     benchmarker.record_simple_metric(
                         index, round_number, "agg", "first_to_last_arrival_s",
-                        arrival_ts[last_link] - arrival_ts[first_link])
-                    straggler = _node_id_from_params_link(last_link)
-                    if straggler is not None:
-                        benchmarker.record_simple_metric(
-                            index, round_number, "agg", "straggling_node_id", straggler)
+                        first_to_last_arrival_s)
+                    benchmarker.record_simple_metric(
+                        index, round_number, "agg", "straggling_node_id", straggling_node_id)
+                except Exception as e:
+                    logger.warning(
+                        f"[{index}][Round {round_number}] straggler metrics skipped: {e}"
+                    )
 
                 aggregation_started = time.time()
                 aggregated_params_link = aggregator.aggregate_model_params(

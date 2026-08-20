@@ -45,6 +45,14 @@ class BenchmarkConfig:
     self_start: bool = False
     cold_start: bool = False
 
+    # rollback (CFL only — DFL peer aggregation isn't guarded yet)
+    rollback_enabled: bool = True             # allow /rollback at all
+    rollback_auto_enabled: bool = False       # auto-rollback on accuracy regression
+    rollback_patience_rounds: int = 3
+    rollback_min_delta: float = 0.0
+    rollback_allow_manual: bool = True
+    rollback_log_events: bool = True
+
     # hybrid only: number of centralized nodes; the rest run decentralized. ignored for
     # pure modes.
     hybrid_centralized: int = 0
@@ -73,6 +81,15 @@ class BenchmarkConfig:
                 )
         if self.cold_start and self.aggregation_mode != AggregationMode.DECENTRALIZED:
             raise ValueError("cold_start only valid in decentralized mode")
+        if self.rollback_auto_enabled and self.aggregation_mode == AggregationMode.DECENTRALIZED:
+            raise ValueError(
+                "rollback_auto_enabled is not supported in decentralized mode yet "
+                "(DFL peer aggregation loads weights outside the rollback guard)"
+            )
+        if self.rollback_patience_rounds < 1:
+            raise ValueError(
+                f"rollback_patience_rounds must be >= 1, got {self.rollback_patience_rounds}"
+            )
 
     @property
     def run_id(self) -> str:
