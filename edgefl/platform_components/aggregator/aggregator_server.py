@@ -13,6 +13,7 @@ from fastapi.responses import PlainTextResponse
 
 
 from platform_components.aggregator.aggregator import Aggregator
+from platform_components.base_fl_participant import require_env
 from platform_components.benchmarking import get_benchmarker
 import asyncio
 import logging
@@ -99,13 +100,13 @@ def init(request: InitRequest):
         node_urls, index = request.nodeUrls, request.index
 
         module_name = os.getenv("MODULE_NAME")
-        module_file = os.getenv("MODULE_FILE")
+        module_file = require_env("MODULE_FILE")
 
         db_name = os.getenv("LOGICAL_DATABASE")
 
         # Verify filepath exists
-        module_path = os.path.join(os.getenv("TRAINING_APPLICATION_DIR"), module_file)
-        module_path = os.path.join(os.getenv("GITHUB_DIR"), module_path)
+        module_path = os.path.join(require_env("TRAINING_APPLICATION_DIR"), module_file)
+        module_path = os.path.join(require_env("GITHUB_DIR"), module_path)
         if not os.path.exists(module_path):
             raise FileNotFoundError(f"Module '{module_file}' does not exist within the given path: '{module_path}'.")
 
@@ -422,7 +423,7 @@ async def listen_for_update_agg(min_params, round_number, index):
     decoded_params = {} # { 'node_params_link': 'decoded_param' }
     # Submodel arrival times keyed like decoded_params, at the poll loop's ~2s
     # resolution — feeds first_to_last_arrival_s and straggling_node_id.
-    arrival_ts = {}
+    arrival_ts: dict[str, float] = {}
     check_chances = 5 # Once this reaches <= 0, we will ignore min_params and handle accordingly
     while True:
         try:
@@ -471,8 +472,8 @@ async def listen_for_update_agg(min_params, round_number, index):
             if len(decoded_params) >= min_params or (decoded_params and not check_chances):
                 benchmarker = get_benchmarker()
                 if len(arrival_ts) >= 2:
-                    first_link = min(arrival_ts, key=arrival_ts.get)
-                    last_link = max(arrival_ts, key=arrival_ts.get)
+                    first_link = min(arrival_ts, key=lambda link: arrival_ts[link])
+                    last_link = max(arrival_ts, key=lambda link: arrival_ts[link])
                     benchmarker.record_simple_metric(
                         index, round_number, "agg", "first_to_last_arrival_s",
                         arrival_ts[last_link] - arrival_ts[first_link])

@@ -22,7 +22,7 @@ from platform_components.lib.modules.local_model_update import LocalModelUpdate
 load_dotenv()
 
 
-def _require_env(name):
+def require_env(name):
     value = os.getenv(name)
     if value is None:
         raise RuntimeError(f"Missing required environment variable: {name}")
@@ -37,7 +37,7 @@ class BaseFLParticipant:
     """
 
     def __init__(self, name, logger):
-        self.github_dir = _require_env('GITHUB_DIR')
+        self.github_dir = require_env('GITHUB_DIR')
         self.edgelake_node_url = f'http://{os.getenv("EXTERNAL_IP")}'
         self.edgelake_tcp_node_ip_port = f'{os.getenv("EXTERNAL_TCP_IP_PORT")}'
 
@@ -53,13 +53,13 @@ class BaseFLParticipant:
         self.round_number = {}
 
         # File paths
-        self.training_application_dir = os.path.join(self.github_dir, _require_env("TRAINING_APPLICATION_DIR"))
-        self.file_write_destination = os.path.join(self.github_dir, _require_env("FILE_WRITE_DESTINATION"), self.name)
-        self.tmp_dir = os.path.join(self.github_dir, _require_env("TMP_DIR"), self.name)
+        self.training_application_dir = os.path.join(self.github_dir, require_env("TRAINING_APPLICATION_DIR"))
+        self.file_write_destination = os.path.join(self.github_dir, require_env("FILE_WRITE_DESTINATION"), self.name)
+        self.tmp_dir = os.path.join(self.github_dir, require_env("TMP_DIR"), self.name)
         self.docker_file_write_destination = None
 
         # Docker
-        if _require_env("EDGELAKE_DOCKER_RUNNING").lower() == "false":
+        if require_env("EDGELAKE_DOCKER_RUNNING").lower() == "false":
             self.docker_running = False
         else:
             self.docker_running = True
@@ -74,7 +74,7 @@ class BaseFLParticipant:
             os.makedirs(os.path.join(self.tmp_dir, index), exist_ok=True)
 
         if self.docker_running:
-            self.docker_file_write_destination = os.path.join(_require_env("DOCKER_FILE_WRITE_DESTINATION"), self.name)
+            self.docker_file_write_destination = os.path.join(require_env("DOCKER_FILE_WRITE_DESTINATION"), self.name)
             self.docker_container_name = os.getenv("EDGELAKE_DOCKER_CONTAINER_NAME")
             create_directory_in_container(self.edgelake_node_url, self.docker_container_name,
                                           os.path.join(self.docker_file_write_destination, index))
