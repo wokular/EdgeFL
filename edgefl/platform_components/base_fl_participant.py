@@ -6,7 +6,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/
 
 import os
 import pickle
-from asyncio import sleep
+import time
 
 from dotenv import load_dotenv
 
@@ -22,6 +22,13 @@ from platform_components.lib.modules.local_model_update import LocalModelUpdate
 load_dotenv()
 
 
+def _require_env(name):
+    value = os.getenv(name)
+    if value is None:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
 class BaseFLParticipant:
     """
     Base class for federated learning participants (aggregator and nodes).
@@ -30,7 +37,7 @@ class BaseFLParticipant:
     """
 
     def __init__(self, name, logger):
-        self.github_dir = os.getenv('GITHUB_DIR')
+        self.github_dir = _require_env('GITHUB_DIR')
         self.edgelake_node_url = f'http://{os.getenv("EXTERNAL_IP")}'
         self.edgelake_tcp_node_ip_port = f'{os.getenv("EXTERNAL_TCP_IP_PORT")}'
 
@@ -46,13 +53,13 @@ class BaseFLParticipant:
         self.round_number = {}
 
         # File paths
-        self.training_application_dir = os.path.join(self.github_dir, os.getenv("TRAINING_APPLICATION_DIR"))
-        self.file_write_destination = os.path.join(self.github_dir, os.getenv("FILE_WRITE_DESTINATION"), self.name)
-        self.tmp_dir = os.path.join(self.github_dir, os.getenv("TMP_DIR"), self.name)
+        self.training_application_dir = os.path.join(self.github_dir, _require_env("TRAINING_APPLICATION_DIR"))
+        self.file_write_destination = os.path.join(self.github_dir, _require_env("FILE_WRITE_DESTINATION"), self.name)
+        self.tmp_dir = os.path.join(self.github_dir, _require_env("TMP_DIR"), self.name)
         self.docker_file_write_destination = None
 
         # Docker
-        if os.getenv("EDGELAKE_DOCKER_RUNNING").lower() == "false":
+        if _require_env("EDGELAKE_DOCKER_RUNNING").lower() == "false":
             self.docker_running = False
         else:
             self.docker_running = True
@@ -67,7 +74,7 @@ class BaseFLParticipant:
             os.makedirs(os.path.join(self.tmp_dir, index), exist_ok=True)
 
         if self.docker_running:
-            self.docker_file_write_destination = os.path.join(os.getenv("DOCKER_FILE_WRITE_DESTINATION"), self.name)
+            self.docker_file_write_destination = os.path.join(_require_env("DOCKER_FILE_WRITE_DESTINATION"), self.name)
             self.docker_container_name = os.getenv("EDGELAKE_DOCKER_CONTAINER_NAME")
             create_directory_in_container(self.edgelake_node_url, self.docker_container_name,
                                           os.path.join(self.docker_file_write_destination, index))
@@ -164,12 +171,12 @@ class BaseFLParticipant:
                     response = read_file(rest_ip_ports[i], path,
                                           local_path, ip_ports[i])
 
-                if response.status_code != 200:
+                if response and response.status_code != 200:
                     raise ValueError(
                         f"Failed to retrieve node params from link: {filename}. HTTP Status: {response.status_code}"
                     )
 
-                sleep(1)
+                time.sleep(1)
                 with open(local_path, 'rb') as f:
                     data = pickle.load(f)
                 if not data:
@@ -218,10 +225,10 @@ class BaseFLParticipant:
             success = False
             while not success:
                 response = insert_policy(self.edgelake_node_url, data)
-                if response.status_code == 200:
+                if response and response.status_code == 200:
                     success = True
                 else:
-                    sleep(5)
+                    time.sleep(5)
 
                     if check_policy_inserted(self.edgelake_node_url, data):
                         success = True

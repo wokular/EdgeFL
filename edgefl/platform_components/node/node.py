@@ -5,7 +5,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/
 """
 import os
 import pickle
-from asyncio import sleep
+import time
 
 from dotenv import load_dotenv
 
@@ -13,6 +13,7 @@ from platform_components.EdgeLake_functions.blockchain_EL_functions import inser
 from platform_components.EdgeLake_functions.mongo_file_store import copy_file_to_container, copy_file_from_container
 from platform_components.EdgeLake_functions.mongo_file_store import read_file
 from platform_components.base_fl_participant import BaseFLParticipant
+from platform_components.helpers.LoadClassFromFile import load_class_from_file
 
 load_dotenv()
 
@@ -41,6 +42,17 @@ class Node(BaseFLParticipant):
         self.set_module_at_index(index, module_name, module_path)
         self.initialize_training_app_on_index(index)
         self.initialize_file_write_paths_on_index(index)
+
+    def initialize_training_app_on_index(self, index):
+        training_app_path = os.path.join(self.training_application_dir, self.module_paths[index])
+        class_name = self.module_names[index]
+        try:
+            TrainingApp_class = load_class_from_file(training_app_path, class_name)
+        except Exception as error:
+            message = f"Could not load training class '{class_name}' from '{training_app_path}': {error}"
+            self.logger.error(f"[{index}] {message}")
+            raise RuntimeError(message) from error
+        self.data_handlers[index] = TrainingApp_class(self.replica_name) # Create an instance at index
 
     '''
     add_data_batch(data)
@@ -76,7 +88,7 @@ class Node(BaseFLParticipant):
                 if response.status_code == 200:
                     success = True
                 else:
-                    sleep(5)
+                    time.sleep(5)
                     if check_policy_inserted(self.edgelake_node_url, data):
                         success = True
 
@@ -112,8 +124,8 @@ class Node(BaseFLParticipant):
                 else:
                     response = read_file(rest_ip_port, aggregator_model_params_db_link, f'{self.file_write_destination}/{index}/{filename}', ip_ports)
 
-                if response.status_code == 200:
-                    sleep(1)
+                if response and response.status_code == 200:
+                    time.sleep(1)
                     with open(
                             f'{self.file_write_destination}/{index}/{filename}',
                             'rb') as f:

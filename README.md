@@ -161,6 +161,34 @@ Address          Node Type Node Name Status
 
 If nodes don't show `+`, check your `LEDGER_CONN` configuration in operator env files. For EdgeLake support, see [EdgeLake Slack](https://lfedge.org/projects/edgelake/).
 
+More over, make sure each operator is connected to the DBMS (the demos utilize the DBMS `mnist_fl`).
+```bash
+docker attach operator1
+EL operator1 +> get databases
+
+Active DBMS Connections
+Logical DBMS Database Type Owner  IP:Port            Configuration                                   Storage
+------------|-------------|------|------------------|-----------------------------------------------|----------|
+almgm       |psql         |system|192.168.1.125:5433|Autocommit On, Failed to pull Fsync            |Persistent|
+mnist_fl    |psql         |user  |192.168.1.125:5433|Autocommit Off, Failed to pull Fsync           |Persistent|
+system_query|psql         |system|192.168.1.125:5433|Autocommit Off, Unflagged, Failed to pull Fsync|Persistent|
+```
+If you don't see the `mnist_fl` line, then you will need to execute the following EdgeLake CLI command
+and re-execute the above command:
+```bash
+connect dbms mnist_fl where type = psql and user = [user] and password = [password] and ip = [ip] and port = [port] and memory = true 
+```
+
+# Demos
+The demo instructions can be found the the `EdgeFL/Demo-READMEs/` directory.
+
+We currently have two demos:
+- [MNIST handwriting dataset demo](Demo-READMEs/MNIST.md)
+- [Winniio demo on temperature prediction](Demo-READMEs/WINNIIO.md), a telemetry dataset. Thank you to your partners [Winniio homepage](https://www.winniio.io)!
+- [Xray detection bounding box](Demo-READMEs/Chest-Xray-BoundingBox.md)
+- [Shakespeare next-character prediction](Demo-READMEs/Shakespeare.md)
+- [MedMNIST blood-cell classification](Demo-READMEs/MedMNIST.md)
+
 ### Verify Database Connections
 
 Attach to an operator and check databases:

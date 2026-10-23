@@ -20,3 +20,9 @@ edgefl/platform_components/node/dflFeatures.txt
 edgefl/platform_components/node/dflPlan.txt
 # Project glossary, not part of this PR
 CONTEXT.md
+edgefl/data/shakespeare/input.txt
+edgefl/data/shakespeare/publish_state.json
+edgefl/data/medmnist/*.npz
+edgefl/data/medmnist/*.part
+edgefl/data/medmnist/publish_state.json
+edgefl/data/medmnist/published_images/
