@@ -14,6 +14,9 @@ Validated end-to-end on Apple Silicon: 5-Node CFL/DFL (July 2026), and 10-Node C
 (August 2026), AnyLog backend, MNIST. See `UPSTREAM_PR_NOTES.md` for what to reconcile
 with [PR #105](https://github.com/royshadmon/EdgeFL/pull/105) before an upstream submission.
 
+New here? [QUICKSTART.md](QUICKSTART.md) has the short version of setup and the
+infra-up, seed, run commands.
+
 ## One-time setup
 
 1. **Docker Desktop** with **host networking enabled**
