@@ -5,6 +5,7 @@
     python -m harness run --mode cfl --nodes 5      # one Run against that infra
     python -m harness suite --tiers 5,10            # full sweep, tiered teardown
     python -m harness infra-down --nodes 5          # stop containers (keep data)
+    python -m harness stop                          # stop leftover aggregator/node servers
 
 Needs edgefl/harness/host_profile.py (copy host_profile.example.py and edit).
 --dry-run on run/suite prints the plan and renders env files without
@@ -149,11 +150,38 @@ def cmd_seed(args, host):
     seed_all(args.nodes, host, REPO_ROOT, dataset=args.dataset)
 
 
+def cmd_stop(args, host):
+    from .process import stop_stray_servers
+    stopped = stop_stray_servers()
+    if not stopped:
+        print("no aggregator/node servers running")
+    for pid, port, name in stopped:
+        print(f"stopped {name} (pid {pid}, port {port})")
+
+
+def _ensure_ports_free(node_count: int, needs_aggregator: bool) -> None:
+    """Exit before touching anything if a server port is taken. Checking here rather than
+    in the run: a failed attempt triggers a full infra rebuild + retry, and that would
+    wipe the stack over a problem a rebuild can't fix."""
+    from .process import busy_ports
+    ports = ([AGGREGATOR_PORT] if needs_aggregator else []) + [
+        i.uvicorn_port for i in node_identities(node_count)
+    ]
+    busy = busy_ports(ports)
+    if busy:
+        lines = "\n".join(f"  :{port} is held by {who}" for port, who in sorted(busy.items()))
+        sys.exit(
+            f"cannot start servers, {len(busy)} port(s) already in use:\n{lines}\n"
+            f"Stop leftover servers with: python -m harness stop"
+        )
+
+
 def cmd_run(args, host):
     config = _config_from_args(args)
     if args.dry_run:
         _dry_run([config], host)
         return
+    _ensure_ports_free(config.node_count, config.needs_central_aggregator)
     from .runner import run_once, run_with_retry
     if args.no_retry:
         results = [run_once(config, host, REPO_ROOT)]
@@ -186,6 +214,9 @@ def cmd_suite(args, host):
 
     from .runner import run_with_retry
     from .seed import seed_all
+
+    # sweeps include CFL configs, so the aggregator port is needed too
+    _ensure_ports_free(max(tiers), needs_aggregator=True)
 
     all_results = []
     for tier in tiers:
@@ -230,6 +261,9 @@ def main():
     p.add_argument("--nodes", type=int, required=True)
     add_common(p)
     p.set_defaults(fn=cmd_seed)
+
+    p = sub.add_parser("stop", help="stop leftover aggregator/node uvicorn servers")
+    p.set_defaults(fn=cmd_stop)
 
     p = sub.add_parser("run", help="execute one Run against running infra")
     p.add_argument("--mode", choices=["cfl", "dfl", "hybrid"], required=True)

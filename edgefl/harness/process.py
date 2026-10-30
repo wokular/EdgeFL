@@ -13,7 +13,9 @@ module is only the Python servers.
 """
 
 import os
+import re
 import signal
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -119,6 +121,86 @@ class ServerProcess:
             self._log_fh.close()
             self._log_fh = None
         logger.info(f"[{self.name}] stopped (rc={self.returncode()})")
+
+
+def _port_holder(port: int) -> str:
+    """Describe whatever is listening on a TCP port: 'pid 123 (<command>)'."""
+    out = subprocess.run(
+        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
+        capture_output=True, text=True,
+    ).stdout
+    pids = re.findall(r"^p(\d+)", out, re.MULTILINE)
+    if not pids:
+        return "an unknown process"
+    cmd = subprocess.run(["ps", "-p", pids[0], "-o", "command="],
+                         capture_output=True, text=True).stdout.strip()
+    return f"pid {pids[0]} ({cmd[:100]})"
+
+
+def busy_ports(ports: list[int]) -> dict[int, str]:
+    """The subset of ports that cannot be bound, each with a description of its holder."""
+    busy = {}
+    for port in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("0.0.0.0", port))
+            except OSError:
+                busy[port] = _port_holder(port)
+    return busy
+
+
+def find_stray_servers() -> list[tuple[int, int | None, str]]:
+    """(pid, port, name) for every running uvicorn of the aggregator/node apps, whoever
+    launched it (a harness run, an interrupted run, or a manual start)."""
+    out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout
+    found = []
+    for line in out.splitlines():
+        pid_s, _, cmd = line.strip().partition(" ")
+        tokens = cmd.split()
+        # Only a Python process whose arguments are literally `-m uvicorn <app>`: matching
+        # the text anywhere in a command line would also hit shells and editors that
+        # merely contain it.
+        if not tokens or not os.path.basename(tokens[0]).lower().startswith("python"):
+            continue
+        name = None
+        for app, label in ((AGGREGATOR_APP, "aggregator"), (NODE_APP, "node")):
+            if ["-m", "uvicorn", app] in [tokens[i:i + 3] for i in range(len(tokens) - 2)]:
+                name = label
+        if name is None or int(pid_s) == os.getpid():
+            continue
+        m = re.search(r"--port (\d+)", cmd)
+        found.append((int(pid_s), int(m.group(1)) if m else None, name))
+    return found
+
+
+def stop_stray_servers(timeout: float = 10.0) -> list[tuple[int, int | None, str]]:
+    """SIGTERM every aggregator/node uvicorn found, SIGKILL any that outlive the timeout.
+    Returns what was found."""
+    servers = find_stray_servers()
+    for pid, _, _ in servers:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.time() + timeout
+    while time.time() < deadline and any(_pid_alive(p) for p, _, _ in servers):
+        time.sleep(0.3)
+    for pid, port, name in servers:
+        if _pid_alive(pid):
+            logger.warning(f"{name} (pid {pid}, port {port}) ignored SIGTERM; sending SIGKILL")
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    return servers
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 class ServerGroup:

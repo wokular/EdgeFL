@@ -21,10 +21,20 @@ with [PR #105](https://github.com/royshadmon/EdgeFL/pull/105) before an upstream
    binds everything to 127.0.0.1 — no host networking means nothing can talk.
 2. **AnyLog license + image + compose repo** — follow
    `AnylogNetworkSetup/AnyLog-Setup.md` sections 2–5:
-   - `docker load < AnyLog-ARM.tar` (image `anylogco/anylog-network:ucsc-arm`)
-   - clone `github.com/AnyLog-co/docker-compose`, branch `roy-local`, and apply the
-     guide's config edits (Makefile TAG, `LICENSE_KEY=$ANYLOG_LICENSE` in
-     `master-configs/base_configs.env`)
+   - an `anylogco/anylog-network` image for the tag in `host_profile.ANYLOG_TAG`
+     (unset = the compose repo's Makefile default). The repo is private: `make login`
+     in the compose repo, or `docker load < AnyLog-ARM.tar` for a pre-built tag.
+   - clone `github.com/AnyLog-co/docker-compose` on branch **`pre-develop`** and point
+     `host_profile.ANYLOG_COMPOSE_DIR` at it. No config edits are needed: the harness
+     generates `docker-makefiles/edgefl-master/` and `edgefl-operator<i>/` from the
+     committed `anylog-master` / `anylog-operator1` configs. (The guide's roy-local
+     steps no longer apply.) Add `docker-makefiles/edgefl-*/` to the repo's
+     `.git/info/exclude` so the generated dirs stay out of `git status`.
+   - license: `pre-develop`'s `deploy.sh` normally runs an interactive acceptance
+     prompt on first `make up`. The harness skips it by putting
+     `LICENSE_KEY=$ANYLOG_LICENSE` in the generated configs (deploy.sh's own
+     "key already in the config" path). Run one `make up` by hand in the compose repo
+     first if you need to accept the license terms yourself.
    - export `ANYLOG_LICENSE` from your shell profile. **An expired license shows up
      as the master idling with no processes** — check expiry first when nothing works.
 3. **Python env** — the repo venv with `requirements.txt` plus
@@ -59,7 +69,17 @@ python -m harness suite --tiers 5 --dry-run
 
 # Stop containers (add --volumes to also wipe blockchain + Postgres data)
 python -m harness infra-down --nodes 5
+
+# Stop leftover aggregator/node_server processes (they run on the host, not in Docker,
+# so infra-down doesn't touch them). A normal `run` cleans up after itself; this is
+# for runs that were interrupted or servers started by hand.
+python -m harness stop
 ```
+
+`run` and `suite` check that the server ports (8080 aggregator, 8081.. nodes) are free
+before doing anything, and exit naming whatever holds each one. They check first
+because a failed attempt triggers a full infra rebuild + retry, which would wipe the
+stack over a problem a rebuild can't fix.
 
 The default per-tier sweep lives in `tier_sweep()` in `__main__.py` — edit it there.
 
@@ -106,11 +126,23 @@ in the CSV (the network keeps training during collection). Filter
 `host_profile.INFRA_BACKEND` selects the Docker stack:
 
 - **`anylog`** (primary, validated) — drives the AnyLog-co/docker-compose Makefile,
-  host networking, needs `ANYLOG_LICENSE`. The harness generates
-  `docker-makefiles/operator<i>-configs/` from operator1's config for any node count.
+  host networking, needs `ANYLOG_LICENSE`. Targets the compose repo's `pre-develop`
+  branch, where each node is one `docker-makefiles/<type>/node_configs.env` started with
+  `make up ANYLOG_TYPE=<type>`. The harness generates `edgefl-master` and
+  `edgefl-operator<i>` (container names `master` / `operator<i>`) from the committed
+  `anylog-master` and `anylog-operator1` configs, so edit those templates (or
+  `_master_values` / `_operator_values` in `infra_anylog.py`) to change settings for
+  every node; edits to the generated dirs are overwritten on each `infra-up`.
+  `DB_TYPE` in `anylog-operator1/node_configs.env` is inherited by all operators; with
+  `sqlite` the harness skips the Postgres shard containers (`infra-down` still stops
+  any left over from an earlier psql setup). Switching `DB_TYPE` needs
+  `infra-down --volumes` first. The master is always sqlite. **MNIST needs `psql` for
+  the operators**: on sqlite the seed fails (AnyLog turns the long `image` text into an
+  unquoted `.blob` token the INSERT can't parse, seen on both the `ucsc-arm` and
+  `2.1.2610` images), so set `OPERATOR_DB_TYPE = "psql"` in `host_profile.py`.
   Every operator gets its **own CLUSTER_NAME** — operators sharing a cluster
   replicate each other's data, which silently breaks per-Node shard isolation (the
-  hand-written operator2/3 demo configs share "NYC-branch"; don't copy that pattern).
+  committed operator2 demo config shares a cluster for HA; don't copy that pattern).
 - **`edgelake`** (open-source fallback, NOT fully working) — brings up containers and
   the master ledger fine, but the EdgeLake image's one-shot deployment script fails to
   self-configure operators (no DBMS connect, no Operator process; its policy push
@@ -128,6 +160,7 @@ in the CSV (the network keeps training during collection). Filter
 | seed succeeds but `select count(*)` shows 0 | rows sit in partitions — query with `destination: network`, or check `get rows count where dbms = mnist_fl` (par_ tables) |
 | `FAILED_SETUP: EdgeLake not ready` from `run` | bring infra up first: `python -m harness infra-up --nodes N` |
 | run completes but CSV is thin | results settle-polling capped out; rerun collection manually via `harness.results.collect_run_csv` |
+| operators sit at Operator `Not declared`; `get error log` shows `Failed to retrieve date and time ... '-$START_DATEd'` | each container clones AnyLog's `deployment-scripts` on first boot (branch `os-dev` under roy-local), and its `set_params.al` mishandled `START_DATE`. The harness comments `START_DATE` out of the generated operator configs. If you start operators by hand, remove `START_DATE=30` from the node's `node_configs.env`. |
 | an operator shows `Cluster Member: False` / duplicate-IP errors in `get error log` | stale duplicate `cluster-operator*` policies accumulated on the blockchain from repeated container restarts over time (AnyLog's own declare-policy step isn't idempotent). No in-place fix — `infra-down --volumes` + fresh `infra-up` clears it. Don't leave the stack running unattended for weeks; tear it down between sessions. |
 
 Useful direct probes (any node, REST):

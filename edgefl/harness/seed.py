@@ -9,6 +9,7 @@ seeds when it just rebuilt, and the CLI exposes it as an explicit command otherw
 
 import os
 import subprocess
+import time
 
 from platform_components.lib.logger.error_handling import get_logger
 from .datasets import get_dataset
@@ -72,6 +73,13 @@ def seed_all(
 ) -> None:
     """Seed operators 1..node_count. Sequential on purpose — N parallel MNIST inserts
     into N Postgres shards on one laptop just thrash."""
+    start = time.time()
     for identity in node_identities(node_count):
+        print(f"[seed {identity.index}/{node_count}] {identity.operator_container}: "
+              f"inserting {dataset} ({num_rounds} batches x {num_rows} rows)...", flush=True)
+        t0 = time.time()
         seed_operator(identity, host, repo_root, dataset, num_rounds, num_rows)
+        print(f"[seed {identity.index}/{node_count}] {identity.operator_container}: "
+              f"done in {time.time() - t0:.0f}s", flush=True)
+    print(f"seeded {dataset} into {node_count} operator(s) in {time.time() - start:.0f}s", flush=True)
     logger.info(f"seeded {dataset} into {node_count} operator(s)")

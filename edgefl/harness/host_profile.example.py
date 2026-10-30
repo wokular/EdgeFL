@@ -35,13 +35,21 @@ DOCKER_HOST = None
 DOCKER_INTERNAL_HOST = "host.docker.internal"
 
 # Which Docker stack runs the blockchain layer.
-#   "anylog"   - PRIMARY on Apple Silicon: AnyLog-co/docker-compose repo (roy-local),
+#   "anylog"   - PRIMARY on Apple Silicon: AnyLog-co/docker-compose repo (pre-develop),
 #                host networking, needs ANYLOG_LICENSE exported. See AnyLog-Setup.md.
 #   "edgelake" - open-source image via the in-repo EdgeLake Makefile, bridge networking.
 INFRA_BACKEND = "anylog"
 
-# anylog backend only: local checkout of github.com/AnyLog-co/docker-compose (roy-local).
+# anylog backend only: local checkout of github.com/AnyLog-co/docker-compose (pre-develop).
 ANYLOG_COMPOSE_DIR = "/Users/myname/Code/docker-compose"
+
+# anylog backend only: image tag passed to `make up` as TAG=. Omit to use the compose
+# repo's Makefile default.
+# ANYLOG_TAG = "2.1.2610"
+
+# anylog backend only: operator database, "sqlite" or "psql". Omit to use the DB_TYPE in
+# the compose repo's anylog-operator1 config. "psql" starts one Postgres shard per node.
+# OPERATOR_DB_TYPE = "sqlite"
 
 # Postgres superuser creds for (re)building operator data shards. Match the values in
 # your EdgeLake operator env files (DB_USER / DB_PASSWD).
