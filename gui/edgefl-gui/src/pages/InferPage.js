@@ -15,16 +15,8 @@ const InferPage = () => {
   const [testEvalLoading, setTestEvalLoading] = useState(false);
   const [testEvalResponse, setTestEvalResponse] = useState(null);
   const [testEvalError, setTestEvalError] = useState(null);
-  const [textNodeUrl, setTextNodeUrl] = useState('localhost:8081');
 
   const textCheck = inputType === 'text' ? inspectShakespearePrompt(inputData) : null;
-  // Text continuation and MedMNIST uploads both run on a training node.
-  // The aggregator does not store that operator's slides.
-  const usesTrainingNode = inputType === 'text' || inputType === 'medmnist';
-
-  const resolveUrl = (value) => (
-    value.startsWith('http://') || value.startsWith('https://') ? value : `http://${value}`
-  );
 
   const generateSampleData = () => {
     const array = generateSampleArray();
@@ -86,8 +78,7 @@ const InferPage = () => {
       }
 
       console.log("FINAL ARRAY:", inputArray)
-      const inferenceUrl = usesTrainingNode ? resolveUrl(textNodeUrl) : serverUrl;
-      const data = await runInference(inferenceUrl, { input: inputArray, index: indexValue });
+      const data = await runInference(serverUrl, { input: inputArray, index: indexValue });
       setResponse(data);
     } catch (err) {
       setError(err.message);
@@ -102,8 +93,7 @@ const InferPage = () => {
     setTestEvalResponse(null);
 
     try {
-      const evaluationUrl = usesTrainingNode ? resolveUrl(textNodeUrl) : serverUrl;
-      const data = await evaluateTestSet(evaluationUrl, indexValue);
+      const data = await evaluateTestSet(serverUrl, indexValue);
       setTestEvalResponse(data);
     } catch (err) {
       setTestEvalError(err.message);
@@ -143,25 +133,6 @@ const InferPage = () => {
           setInputData={setInputData}
           onDataChange={handleDataChange}
         />
-
-        {usesTrainingNode && (
-          <div className="form-group">
-            <label htmlFor="textNodeUrl">Training node:</label>
-            <input
-              type="text"
-              id="textNodeUrl"
-              value={textNodeUrl}
-              onChange={(e) => setTextNodeUrl(e.target.value)}
-              placeholder="localhost:8081"
-              required
-            />
-            <small>
-              {inputType === 'medmnist'
-                ? 'The uploaded image is classified by this training node, not the aggregator in the header. The node must already be initialized with the index above.'
-                : 'Live text prediction is sent to this training node, not the aggregator in the header. The node must already be initialized with the index above.'}
-            </small>
-          </div>
-        )}
 
         {textCheck && textCheck.dropped.length > 0 && (
           <div className="info-box">

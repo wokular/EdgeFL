@@ -64,6 +64,17 @@ python -m harness run --mode cfl --nodes 5 --rounds 10
 # DFL (self-start + cold-start are implied by the mode)
 python -m harness run --mode dfl --nodes 5 --rounds 10
 
+# MedMNIST (sqlite operators): pass --dataset to infra-up, seed AND run. The dataset's
+# database is created by infra-up, so operators only serve the dataset they were started
+# for. See QUICKSTART.md, "MedMNIST on sqlite".
+python -m harness infra-up --nodes 10 --dataset medmnist --seed
+python -m harness run --mode cfl --nodes 10 --rounds 3 --dataset medmnist --keep-servers
+
+# Leave the servers up after a completed run, for inference (curl or the GUI in
+# gui/edgefl-gui). They are detached from the terminal and stop on the next harness
+# command, or with `python -m harness stop`.
+python -m harness run --mode cfl --nodes 5 --rounds 10 --keep-servers
+
 # The default Config sweep across Tiers (full rebuild + reseed at each tier boundary)
 python -m harness suite --tiers 5,10
 
@@ -161,6 +172,8 @@ in the CSV (the network keeps training during collection). Filter
 | `connection refused` to any 32X49 port | Docker Desktop host networking disabled |
 | operator has no `mnist_fl` in `get databases` | Postgres shard not up, or wrong `DB_PORT` in its generated config |
 | seed succeeds but `select count(*)` shows 0 | rows sit in partitions — query with `destination: network`, or check `get rows count where dbms = mnist_fl` (par_ tables) |
+| `operatorN has no 'mydb' database` / node `Error fetching datasets: 'Query'` | operators were started for a different dataset than the one passed to `seed`/`run`. `infra-down --volumes`, then `infra-up --dataset <same>` |
+| seed prints `Errno 49 Can't assign requested address` | local ports exhausted: the AnyLog REST server closes every connection and macOS holds each port ~30 s. The MedMNIST publisher paces itself at 400 rows/s now; re-run `seed` |
 | `FAILED_SETUP: EdgeLake not ready` from `run` | bring infra up first: `python -m harness infra-up --nodes N` |
 | run completes but CSV is thin | results settle-polling capped out; rerun collection manually via `harness.results.collect_run_csv` |
 | operators sit at Operator `Not declared`; `get error log` shows `Failed to retrieve date and time ... '-$START_DATEd'` | each container clones AnyLog's `deployment-scripts` on first boot (branch `os-dev` under roy-local), and its `set_params.al` mishandled `START_DATE`. The harness comments `START_DATE` out of the generated operator configs. If you start operators by hand, remove `START_DATE=30` from the node's `node_configs.env`. |
@@ -190,12 +203,13 @@ curl -s http://127.0.0.1:32049 -H "User-Agent: AnyLog/1.23" -H "command: blockch
   image's deployment script once networking is up.
 - **Plotting** — out of scope by decision; CSVs are long-format so a pandas/matplotlib
   layer can read past suites without re-running.
-- **Datasets beyond MNIST** — the platform itself already supports this (data handlers
-  are loaded dynamically via `MODULE_NAME`/`MODULE_FILE`; `chest_xrays_bbox` and
-  `winniio` data handlers + env files already exist alongside MNIST's), but the
-  harness's `datasets.py` registry only has an MNIST `DatasetProfile` wired up. Adding
-  another is small: a new `DatasetProfile` entry (module name/file, logical db, train/
-  test table names) plus a `seed.py` entry pointing at that dataset's insertion script.
+- **More datasets** — `datasets.py` has `mnist` and `medmnist` (BloodMNIST: scalar rows
+  in AnyLog, PNGs on disk, so it runs on sqlite operators; MNIST needs `psql`). Pick one
+  with `--dataset`; the profile also sets the operators' `DEFAULT_DBMS`, the handler's
+  extra env, and how many rounds `seed` inserts. Other handlers
+  (`chest_xrays_bbox`, `winniio`) already exist in the platform. Adding one is small: a
+  new `DatasetProfile` entry (module name/file, logical db, train/test table names, extra
+  env) plus a `seed.py` entry pointing at that dataset's insertion script.
   One wrinkle: `winniio_db_script.py` writes straight to Postgres with raw SQL rather
   than through AnyLog's REST insert like `store_data.py`/`chest_xrays_bbox_db_script.py`
   do, so wiring in Winniio specifically needs a slightly different `seed_operator` path,

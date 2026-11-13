@@ -12,6 +12,7 @@ EdgeLake master/operators and Postgres are Docker containers, handled in infra.p
 module is only the Python servers.
 """
 
+import json
 import os
 import re
 import signal
@@ -82,6 +83,7 @@ class ServerProcess:
             cmd,
             cwd=self.edgefl_dir,
             env=child_env,
+            stdin=subprocess.DEVNULL,
             stdout=stdout,
             stderr=stderr,
             # new process group so teardown can signal the whole tree (uvicorn workers)
@@ -177,6 +179,12 @@ def stop_stray_servers(timeout: float = 10.0) -> list[tuple[int, int | None, str
     """SIGTERM every aggregator/node uvicorn found, SIGKILL any that outlive the timeout.
     Returns what was found."""
     servers = find_stray_servers()
+    _terminate(servers, timeout)
+    _forget_kept_servers()
+    return servers
+
+
+def _terminate(servers: list[tuple[int, int | None, str]], timeout: float) -> None:
     for pid, _, _ in servers:
         try:
             os.kill(pid, signal.SIGTERM)
@@ -192,7 +200,54 @@ def stop_stray_servers(timeout: float = 10.0) -> list[tuple[int, int | None, str
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-    return servers
+
+
+# Servers left running by `run --keep-servers`. They outlive the harness process and the
+# terminal (each is its own session), so the record of which ones belong to the harness
+# lives in a file; the next harness command reads it and stops them.
+KEPT_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs", ".kept_servers.json")
+
+
+def save_kept_servers(group: "ServerGroup", run_id: str, run_dir: str) -> None:
+    state = {
+        "run_id": run_id,
+        "run_dir": run_dir,
+        "servers": [{"name": s.name, "port": s.port, "pid": s.pid} for s in group.servers],
+    }
+    os.makedirs(os.path.dirname(KEPT_STATE_PATH), exist_ok=True)
+    with open(KEPT_STATE_PATH, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def load_kept_servers() -> dict | None:
+    try:
+        with open(KEPT_STATE_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _forget_kept_servers() -> None:
+    try:
+        os.remove(KEPT_STATE_PATH)
+    except OSError:
+        pass
+
+
+def stop_kept_servers(timeout: float = 10.0) -> dict | None:
+    """Stop the servers a previous `--keep-servers` run left up. Returns that run's state
+    (plus the servers actually stopped under "stopped"), or None if nothing was kept.
+    A recorded pid is only signalled if it is still a uvicorn of ours on the recorded
+    port, so a recycled pid can't take a signal meant for something else."""
+    state = load_kept_servers()
+    if not state:
+        return None
+    live = {(pid, port) for pid, port, _ in find_stray_servers()}
+    mine = [(s["pid"], s["port"], s["name"]) for s in state["servers"]
+            if (s["pid"], s["port"]) in live]
+    _terminate(mine, timeout)
+    _forget_kept_servers()
+    return {**state, "stopped": mine}
 
 
 def _pid_alive(pid: int) -> bool:

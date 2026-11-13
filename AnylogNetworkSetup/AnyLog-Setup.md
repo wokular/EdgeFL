@@ -81,7 +81,7 @@ ANYLOG_LICENSE="56b3d57....269ff{'company':'Guest','expiration':'somedate','type
 
 ### Source the key
 
-Add the following to your shell profile (e.g. `~/.zshrc`) so it loads automatically:
+Add the following to your shell profile (e.g. `~/.zprofile`) so it loads automatically:
 
 ```bash
 source [YOUR_CREDENTIALS_DIRECTORY]/.anylog_key.env

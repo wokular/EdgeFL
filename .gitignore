@@ -24,5 +24,6 @@ edgefl/data/shakespeare/input.txt
 edgefl/data/shakespeare/publish_state.json
 edgefl/data/medmnist/*.npz
 edgefl/data/medmnist/*.part
+edgefl/data/medmnist/bloodmnist.npz
 edgefl/data/medmnist/publish_state.json
 edgefl/data/medmnist/published_images/

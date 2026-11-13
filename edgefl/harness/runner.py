@@ -31,7 +31,7 @@ from .completion import CompletionMonitor, PollResult
 from .config import AggregationMode, BenchmarkConfig
 from .env_render import render_run_env_files
 from .identity import AGGREGATOR_PORT, node_identities, node_identity
-from .process import AGGREGATOR_APP, NODE_APP, ServerGroup, ServerProcess
+from .process import AGGREGATOR_APP, NODE_APP, ServerGroup, ServerProcess, save_kept_servers
 from .readiness import wait_all_http_up, wait_edgelake_status
 from .results import collect_run_csv
 
@@ -109,6 +109,18 @@ def _build_server_group(
     return group
 
 
+def _print_log_hints(group: ServerGroup, run_dir: str) -> None:
+    """Tell the person watching where to follow the run live: the aggregator's log (CFL)
+    and the first node's, plus a glob for everything."""
+    log_dir = os.path.join(run_dir, "logs")
+    names = [s.name for s in group.servers]
+    picks = [n for n in names if n == "aggregator"] + [n for n in names if n != "aggregator"][:1]
+    print("\nservers launched; follow the run live in another terminal:", flush=True)
+    for name in picks:
+        print(f"  tail -f {log_dir}/{name}.log", flush=True)
+    print(f"  tail -f {log_dir}/*.log   # all servers\n", flush=True)
+
+
 def _check_operators_ready(config: BenchmarkConfig, host) -> list[str]:
     """Quick gate that the tier's operators (and master) answer `get status`.
     Returns the endpoints that are NOT ready."""
@@ -181,8 +193,12 @@ def _write_manifest(run_dir: str, config: BenchmarkConfig, result: RunResult) ->
         json.dump(manifest, f, indent=2)
 
 
-def run_once(config: BenchmarkConfig, host, repo_root: str, attempt: int = 1) -> RunResult:
-    """Execute one Run end-to-end against already-running infra."""
+def run_once(
+    config: BenchmarkConfig, host, repo_root: str, attempt: int = 1, keep_servers: bool = False
+) -> RunResult:
+    """Execute one Run end-to-end against already-running infra. With keep_servers, a
+    COMPLETED run leaves its servers up (recorded for the next harness command to stop);
+    any failure still tears them down."""
     if (
         config.aggregation_mode == AggregationMode.DECENTRALIZED
         and not (config.self_start and config.cold_start)
@@ -217,9 +233,11 @@ def run_once(config: BenchmarkConfig, host, repo_root: str, attempt: int = 1) ->
 
     env_paths = render_run_env_files(config, host, run_dir, index_name=index)
     group = _build_server_group(config, host, repo_root, run_dir, env_paths)
+    kept = False
 
     try:
         group.start_all()
+        _print_log_hints(group, run_dir)
         failed_urls = wait_all_http_up([s.url for s in group.servers], timeout_s=120)
         if failed_urls:
             return finish(
@@ -259,6 +277,7 @@ def run_once(config: BenchmarkConfig, host, repo_root: str, attempt: int = 1) ->
             if poll == PollResult.COMPLETE:
                 time.sleep(METRIC_FLUSH_GRACE_S)
                 _, rows = collect_run_csv(query_conn, index, csv_path)
+                kept = keep_servers
                 return finish(
                     RunStatus.COMPLETED,
                     f"completed in {monitor.elapsed_s:.0f}s", csv_path, rows,
@@ -278,24 +297,28 @@ def run_once(config: BenchmarkConfig, host, repo_root: str, attempt: int = 1) ->
                 csv_path, rows,
             )
     finally:
-        group.stop_all()
-        _wipe_run_state(host)
+        if kept:
+            # The file-transfer artifacts stay too: stopping the kept servers wipes them.
+            save_kept_servers(group, index, run_dir)
+        else:
+            group.stop_all()
+            _wipe_run_state(host)
 
 
 def run_with_retry(
-    config: BenchmarkConfig, host, repo_root: str, rebuild_fn=None
+    config: BenchmarkConfig, host, repo_root: str, rebuild_fn=None, keep_servers: bool = False
 ) -> list[RunResult]:
     """The plan's failure policy: one retry after a fresh Full rebuild, then hard-fail.
     rebuild_fn (from the CLI/suite layer) tears down and rebuilds the Docker infra +
     reseeds data; without one the retry runs against the existing infra."""
-    first = run_once(config, host, repo_root, attempt=1)
+    first = run_once(config, host, repo_root, attempt=1, keep_servers=keep_servers)
     if first.ok:
         return [first]
 
     logger.warning(f"[{config.run_id}] attempt 1 failed ({first.status.value}); retrying once")
     if rebuild_fn is not None:
         rebuild_fn()
-    second = run_once(config, host, repo_root, attempt=2)
+    second = run_once(config, host, repo_root, attempt=2, keep_servers=keep_servers)
     if not second.ok:
         logger.error(f"[{config.run_id}] hard failure after retry ({second.status.value})")
     return [first, second]

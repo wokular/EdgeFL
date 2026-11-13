@@ -25,6 +25,7 @@ import argparse
 import json
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,13 +133,41 @@ def _session():
     return session
 
 
+# The AnyLog REST server closes every connection, so each row uses one local port, and
+# macOS keeps a closed port in TIME_WAIT for ~30 s. The ~16k ephemeral ports therefore
+# sustain ~550 rows/s; above that every connect fails with Errno 49 ('Can't assign
+# requested address') and a whole seed can be lost. Pace under that with headroom.
+MAX_ROWS_PER_SECOND = 400
+CONNECT_RETRIES = 6
+_PACE_LOCK = threading.Lock()
+_NEXT_SLOT = [0.0]
+
+
+def _pace():
+    """Block until this thread's turn so all workers together stay under the rate."""
+    with _PACE_LOCK:
+        now = time.monotonic()
+        slot = max(now, _NEXT_SLOT[0])
+        _NEXT_SLOT[0] = slot + 1.0 / MAX_ROWS_PER_SECOND
+    if slot > now:
+        time.sleep(slot - now)
+
+
 def put_row(conn, db_name, table_name, row):
-    response = _session().put(
-        url=f"http://{conn}",
-        data=json.dumps(row),
-        headers=create_header(db_name, table_name),
-        timeout=30,
-    )
+    for attempt in range(CONNECT_RETRIES):
+        _pace()
+        try:
+            response = _session().put(
+                url=f"http://{conn}",
+                data=json.dumps(row),
+                headers=create_header(db_name, table_name),
+                timeout=30,
+            )
+            break
+        except requests.ConnectionError:
+            if attempt == CONNECT_RETRIES - 1:
+                raise
+            time.sleep(2 * (attempt + 1))  # let TIME_WAIT sockets drain
     response.raise_for_status()
 
 

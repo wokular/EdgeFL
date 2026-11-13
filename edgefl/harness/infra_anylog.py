@@ -20,10 +20,13 @@ a cluster replicate each other's data, which would silently break per-Node data-
 isolation. Container names stay `master` / `operator<i>`.
 """
 
+import json
 import os
 import re
 import subprocess
 import time
+
+import requests
 
 from platform_components.lib.logger.error_handling import get_logger
 from .identity import NodeIdentity, master_ports, node_identities
@@ -49,7 +52,7 @@ def _compose_dir(host) -> str:
     return d
 
 
-def require_license() -> None:
+def require_license(node_count: int = 0) -> None:
     if not os.environ.get("ANYLOG_LICENSE"):
         raise RuntimeError(
             "ANYLOG_LICENSE is not set in the environment. The generated node configs "
@@ -65,6 +68,64 @@ def require_license() -> None:
             "then rejects it ('Wrong license info format'). Wrap it in single quotes instead: "
             "export ANYLOG_LICENSE='<hex>{\"company\": ...}'  then open a new shell."
         )
+    _check_license_terms(key, node_count)
+
+
+def _check_license_terms(key: str, node_count: int) -> None:
+    """Catch an expired key or too few licensed nodes before anything starts. The hex part
+    is a signature over the JSON part, so these numbers can only be changed by AnyLog."""
+    try:
+        terms = json.loads(key[key.index("{"):])
+    except (ValueError, json.JSONDecodeError):
+        raise RuntimeError(
+            "ANYLOG_LICENSE has no readable JSON part after the hex signature. It should "
+            "look like <hex>{\"company\": \"...\", \"expiration\": \"...\", \"max_nodes\": N}."
+        )
+    expiration = str(terms.get("expiration", ""))
+    if expiration and expiration < time.strftime("%Y-%m-%d"):
+        raise RuntimeError(f"ANYLOG_LICENSE expired on {expiration}. Ask AnyLog for a new key.")
+    max_nodes = terms.get("max_nodes")
+    needed = node_count + 1  # operators + master
+    if node_count and isinstance(max_nodes, int) and max_nodes < needed:
+        print(
+            f"[infra] WARNING: ANYLOG_LICENSE allows {max_nodes} nodes but this run starts "
+            f"{needed} (master + {node_count} operators). Ask AnyLog for a larger key. "
+            "Do NOT edit max_nodes yourself: it breaks the signature and AnyLog rejects the "
+            "whole key.",
+            flush=True,
+        )
+
+
+def _check_license_active(rest_conn: str) -> bool:
+    """Fail fast when the master booted but did not activate the license. Returns False
+    when the status could not be read at all (unknown, not a failure)."""
+    text = None
+    for attempt in range(6):
+        try:
+            text = requests.get(
+                f"http://{rest_conn}",
+                # Without an AnyLog/curl User-Agent the REST server frames a text reply as
+                # JSON and sends an empty chunked body ('Response ended prematurely').
+                headers={"command": "get license", "User-Agent": "AnyLog/1.23"},
+                timeout=20,
+            ).text
+            break
+        except requests.RequestException as e:
+            logger.warning(f"could not read license status from master (try {attempt + 1}/6): {e}")
+            time.sleep(5)
+    if text is None:
+        return False
+    if "missing" in text.lower():
+        raise RuntimeError(
+            "AnyLog master started but did not activate the license ('Activation license "
+            "is missing'); network-wide queries will fail. The usual cause is an "
+            "ANYLOG_LICENSE whose JSON part was edited (e.g. max_nodes), which invalidates "
+            "the signature: the boot log shows 'Wrong license key'. Use the key exactly as "
+            "AnyLog issued it. To check by hand: "
+            "curl -X POST http://" + rest_conn + " -H \"command: set license where "
+            "activation_key=$ANYLOG_LICENSE\""
+        )
+    return True
 
 
 def _run(cmd: list[str], cwd: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -234,8 +295,14 @@ def _say(t0: float, msg: str) -> None:
     print(f"[infra +{time.time() - t0:.0f}s] {msg}", flush=True)
 
 
+# Each container clones AnyLog's deployment-scripts from GitHub on every boot, so a boot
+# takes ~40 s on a good connection and many minutes on a slow one (one clone ran at
+# ~54 KiB/s). Too short a wait fails a stack that was about to come up.
+BOOT_TIMEOUT_S = 600.0
+
+
 def _ensure_node_healthy(
-    container: str, rest_conn: str, process_name: str, timeout_s: float = 150.0,
+    container: str, rest_conn: str, process_name: str, timeout_s: float = BOOT_TIMEOUT_S,
     t0: float | None = None,
 ) -> None:
     """Deep readiness with one self-heal: the node's deployment script is one-shot and
@@ -263,7 +330,7 @@ def infra_up(node_count: int, host, repo_root: str, logical_db: str = "mnist_fl"
     operators, gating each layer on DEEP readiness (processes running, not just REST
     answering). Requires ANYLOG_LICENSE in the environment."""
     t0 = time.time()
-    require_license()
+    require_license(node_count)
     compose_dir = _compose_dir(host)
     identities = node_identities(node_count)
     generate_node_configs(identities, compose_dir, logical_db, host)
@@ -283,13 +350,17 @@ def infra_up(node_count: int, host, repo_root: str, logical_db: str = "mnist_fl"
     _make("up", MASTER_TYPE, compose_dir, host)
     master_rest, _ = master_ports()
     _say(t0, "master container up, waiting for it to answer...")
-    if not wait_edgelake_status(f"{host.EDGELAKE_HOST}:{master_rest}", timeout_s=180):
+    if not wait_edgelake_status(f"{host.EDGELAKE_HOST}:{master_rest}", timeout_s=BOOT_TIMEOUT_S):
         raise RuntimeError(
             "AnyLog master never answered `get status`. If it is running but idle, "
             "check the license (expired ANYLOG_LICENSE presents exactly like this)."
         )
     _ensure_node_healthy("master", f"{host.EDGELAKE_HOST}:{master_rest}", "TCP", t0=t0)
     _say(t0, "master healthy")
+    if _check_license_active(f"{host.EDGELAKE_HOST}:{master_rest}"):
+        _say(t0, "license active")
+    else:
+        _say(t0, "WARNING: could not read the master's license status; continuing")
 
     for ident in identities:
         _say(t0, f"starting {ident.operator_container} ({ident.index}/{node_count})...")
@@ -343,6 +414,10 @@ def infra_down(node_count: int, host, repo_root: str, remove_volumes: bool = Fal
     _remove_node_containers("master")
     if remove_volumes:
         _remove_node_volumes("master")
+    # The compose repo's deploy script adds this license-page server (port 32000) to the first
+    # master it deploys, with restart: always, so `make down` leaves it running. The next
+    # infra-up recreates it. Anything else on this machine only loses the license web page.
+    subprocess.run(["docker", "rm", "-f", "anylog-licenses"], capture_output=True, text=True)
     # shards may exist from an earlier psql setup, so always stop them
     for ident in reversed(node_identities(node_count)):
         stop_postgres(ident.index, repo_root, remove_volume=remove_volumes)

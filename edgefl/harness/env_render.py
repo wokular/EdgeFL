@@ -60,6 +60,7 @@ def render_node_env(
     env["LOGICAL_DATABASE"] = ds.logical_database
     env["TRAIN_TABLE"] = ds.train_table
     env["TEST_TABLE"] = ds.test_table
+    env.update(dict(ds.extra_env))
 
     # derived identity
     env["SERVER_TYPE"] = "node"

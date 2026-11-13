@@ -17,6 +17,7 @@ import os
 import sys
 
 from .config import AggregationMode, BenchmarkConfig, DriftHandling
+from .datasets import get_dataset
 from .env_render import render_run_env_files
 from .identity import AGGREGATOR_PORT, node_identities
 
@@ -133,11 +134,54 @@ def _print_results(results) -> None:
         print(f"  {len(failed)} attempt(s) did not complete.")
 
 
+def _check_db_supports_dataset(host, dataset: str) -> None:
+    """Exit before seeding if the operators' DB can't hold this dataset (MNIST on sqlite
+    otherwise fails silently: every insert lands in the operator's error/ folder)."""
+    backend = _backend(host)
+    if not get_dataset(dataset).requires_psql or not hasattr(backend, "operator_db_type"):
+        return
+    if backend.operator_db_type(backend._compose_dir(host), host) == "sqlite":
+        sys.exit(
+            f"dataset '{dataset}' needs Postgres operators but they are set to sqlite. "
+            f"Set OPERATOR_DB_TYPE = \"psql\" in host_profile.py and rebuild "
+            f"(infra-down --volumes), or use a sqlite-friendly dataset (--dataset medmnist)."
+        )
+
+
+def _check_operators_have_db(host, node_count: int, dataset: str) -> None:
+    """Exit if the running operators were started for a different dataset. Their logical
+    database is fixed at infra-up, and without it seeding streams into nothing (the rows
+    are counted as sent but never stored) and nodes fail to initialize."""
+    import re
+    import requests
+    db = get_dataset(dataset).logical_database
+    for ident in node_identities(node_count):
+        try:
+            text = requests.get(
+                f"http://{host.EDGELAKE_HOST}:{ident.edgelake_rest_port}",
+                headers={"command": "get databases", "User-Agent": "AnyLog/1.23"},
+                timeout=15,
+            ).text
+        except requests.RequestException:
+            continue  # infra not reachable: the command itself reports that
+        if not re.search(rf"^\s*{re.escape(db)}\s*\|", text, re.MULTILINE):
+            sys.exit(
+                f"operator{ident.index} has no '{db}' database, so it was started for a "
+                f"different dataset than '{dataset}'. Rebuild it for this dataset:\n"
+                f"  python -m harness infra-down --nodes {node_count} --volumes\n"
+                f"  python -m harness infra-up --nodes {node_count} --dataset {dataset}"
+            )
+
+
 def cmd_infra_up(args, host):
     from .seed import seed_all
-    _backend(host).infra_up(args.nodes, host, REPO_ROOT)
     if args.seed:
-        seed_all(args.nodes, host, REPO_ROOT, dataset=args.dataset)
+        _check_db_supports_dataset(host, args.dataset)
+    _backend(host).infra_up(
+        args.nodes, host, REPO_ROOT, logical_db=get_dataset(args.dataset).logical_database
+    )
+    if args.seed:
+        seed_all(args.nodes, host, REPO_ROOT, dataset=args.dataset, num_rounds=args.seed_rounds)
     print(f"infra up for {args.nodes} node(s)" + (" (seeded)" if args.seed else ""))
 
 
@@ -147,7 +191,35 @@ def cmd_infra_down(args, host):
 
 def cmd_seed(args, host):
     from .seed import seed_all
-    seed_all(args.nodes, host, REPO_ROOT, dataset=args.dataset)
+    _check_db_supports_dataset(host, args.dataset)
+    _check_operators_have_db(host, args.nodes, args.dataset)
+    seed_all(args.nodes, host, REPO_ROOT, dataset=args.dataset, num_rounds=args.seed_rounds)
+
+
+def _stop_kept_servers(host) -> None:
+    """Servers a previous `run --keep-servers` left up are stopped by whatever harness
+    command comes next, so they never pile up or hold ports unnoticed."""
+    from .process import stop_kept_servers
+    kept = stop_kept_servers()
+    if kept:
+        from .runner import _wipe_run_state
+        _wipe_run_state(host)
+        print(f"stopped {len(kept['stopped'])} server(s) kept from run {kept['run_id']}")
+
+
+def _print_kept_servers() -> None:
+    from .process import load_kept_servers
+    state = load_kept_servers()
+    if not state:
+        return
+    nodes = [s for s in state["servers"] if s["name"] != "aggregator"]
+    print(f"\nservers left running for inference (index = {state['run_id']}):")
+    for s in nodes:
+        print(f"  {s['name']:<7} http://localhost:{s['port']}   "
+              f"curl -X POST http://localhost:{s['port']}/inference/{state['run_id']}")
+    print("GUI: cd gui/edgefl-gui && npm start, then use Inference with a node URL above")
+    print("They keep running after this command exits, and stop on your next harness "
+          "command (or: python -m harness stop).")
 
 
 def cmd_stop(args, host):
@@ -182,14 +254,22 @@ def cmd_run(args, host):
         _dry_run([config], host)
         return
     _ensure_ports_free(config.node_count, config.needs_central_aggregator)
+    _check_operators_have_db(host, config.node_count, args.dataset)
+    if args.keep_servers and config.aggregation_mode != AggregationMode.CENTRALIZED:
+        print("note: DFL nodes never stop training on their own, so kept servers keep "
+              "running rounds (and the model keeps changing) after the run completes.")
     from .runner import run_once, run_with_retry
     if args.no_retry:
-        results = [run_once(config, host, REPO_ROOT)]
+        results = [run_once(config, host, REPO_ROOT, keep_servers=args.keep_servers)]
     else:
-        results = run_with_retry(config, host, REPO_ROOT, rebuild_fn=_rebuild_fn(config, host, args.dataset))
+        results = run_with_retry(config, host, REPO_ROOT,
+                                 rebuild_fn=_rebuild_fn(config, host, args.dataset),
+                                 keep_servers=args.keep_servers)
     _print_results(results)
     if not results[-1].ok:
         sys.exit(1)
+    if args.keep_servers:
+        _print_kept_servers()
 
 
 def _rebuild_fn(config: BenchmarkConfig, host, dataset: str):
@@ -197,6 +277,7 @@ def _rebuild_fn(config: BenchmarkConfig, host, dataset: str):
         from .seed import seed_all
         _backend(host).infra_rebuild(
             config.node_count, host, REPO_ROOT,
+            logical_db=get_dataset(dataset).logical_database,
             seed_fn=lambda: seed_all(config.node_count, host, REPO_ROOT, dataset=dataset),
         )
     return rebuild
@@ -225,6 +306,7 @@ def cmd_suite(args, host):
         print(f"\n=== tier {tier}: full rebuild + seed ===")
         _backend(host).infra_rebuild(
             tier, host, REPO_ROOT,
+            logical_db=get_dataset(args.dataset).logical_database,
             seed_fn=lambda t=tier: seed_all(t, host, REPO_ROOT, dataset=args.dataset),
         )
         for config in sweeps[tier]:
@@ -248,6 +330,8 @@ def main():
     p = sub.add_parser("infra-up", help="start Postgres + master + operators for a tier")
     p.add_argument("--nodes", type=int, required=True)
     p.add_argument("--seed", action="store_true", help="insert the dataset after startup")
+    p.add_argument("--seed-rounds", type=int, default=None,
+                   help="rounds of data to insert with --seed (default: the dataset's own)")
     add_common(p)
     p.set_defaults(fn=cmd_infra_up)
 
@@ -259,6 +343,8 @@ def main():
 
     p = sub.add_parser("seed", help="insert the dataset into operators 1..N")
     p.add_argument("--nodes", type=int, required=True)
+    p.add_argument("--seed-rounds", type=int, default=None,
+                   help="rounds of data to insert (default: the dataset's own)")
     add_common(p)
     p.set_defaults(fn=cmd_seed)
 
@@ -278,6 +364,9 @@ def main():
     p.add_argument("--no-progress-timeout", type=int, default=300)
     p.add_argument("--no-retry", action="store_true",
                    help="fail immediately instead of retrying once after a full rebuild")
+    p.add_argument("--keep-servers", action="store_true",
+                   help="leave the servers running after a completed run (for inference); "
+                        "the next harness command stops them")
     p.add_argument("--dry-run", action="store_true")
     add_common(p)
     p.set_defaults(fn=cmd_run)
@@ -290,6 +379,7 @@ def main():
 
     args = parser.parse_args()
     host = _load_host_profile()
+    _stop_kept_servers(host)
     args.fn(args, host)
 
 

@@ -177,6 +177,12 @@ def parse_args(argv):
         default=0,
         help="0 keeps streaming until the process is interrupted",
     )
+    parse.add_argument(
+        "--first-round",
+        type=int,
+        default=1,
+        help="start at this round number (to re-publish rounds an operator rejected)",
+    )
     parse.add_argument("--seed", type=int, default=7)
     parse.add_argument("--dry-run", action="store_true", help="Print the round plan and exit")
     args = parse.parse_args(argv)
@@ -224,7 +230,7 @@ def main(argv=None):
     for conn in args.nodes:
         prepare_node(conn, args.db_name, (args.train_table, args.test_table))
 
-    round_number = 1
+    round_number = args.first_round
     try:
         while args.num_rounds <= 0 or round_number <= args.num_rounds:
             stream_round(round_number, train_shards, test_shards, args.nodes, args, tables)

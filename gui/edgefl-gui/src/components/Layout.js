@@ -24,7 +24,9 @@ const Layout = ({ children }) => {
               type="text"
               value={nodeUrl}
               onChange={(e) => setNodeUrl(e.target.value)}
-              placeholder="localhost:8080"
+              placeholder="localhost:8080 or http://localhost:8081"
+              title="host:port or full URL. Training: aggregator (8080). Inference: a node (e.g. 8081)."
+              spellCheck={false}
               className="server-input"
             />
           </div>

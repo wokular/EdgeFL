@@ -65,6 +65,55 @@ for i in $(seq 1 5); do p=$((32049 + i*100)); printf "op$i "; curl -s -m 20 http
 An operator that prints nothing is empty. Re-seeding just that one is safe:
 `cd data/mnist && python store_data.py 127.0.0.1:<rest-port> --db-name mnist_fl`.
 
+## MedMNIST on sqlite
+
+BloodMNIST stores only scalar rows (filename, label, round) in AnyLog and keeps the PNGs
+on disk, so it runs on sqlite operators, which is the compose repo's default. In
+`host_profile.py` set `OPERATOR_DB_TYPE = "sqlite"` (or delete the line), then rebuild:
+
+```bash
+python -m harness infra-down --nodes 10 --volumes
+python -m harness infra-up --nodes 10 --dataset medmnist
+python -m harness seed --nodes 10 --dataset medmnist      # --seed-rounds N to change the 10 default
+python -m harness run --mode cfl --nodes 10 --rounds 3 --dataset medmnist --keep-servers
+```
+
+`infra-up --nodes 10 --dataset medmnist --seed` does the second and third commands together.
+
+**Pass `--dataset medmnist` to `infra-up`, `seed` and `run`.** The default is `mnist`. The
+dataset's database (`mydb` for MedMNIST, `mnist_fl` for MNIST) is created by `infra-up`, so
+the operators can only serve the dataset they were brought up for. If they were started
+without `--dataset medmnist`, `seed` streams rows into a database that does not exist (they
+are counted as sent but never stored) and `run` fails every node with
+`Error fetching datasets: 'Query'`. `seed` and `run` now stop with the rebuild commands
+when they see that mismatch.
+
+After a run that was started with the wrong dataset: stop it (`Ctrl-C`, then
+`python -m harness stop` for any leftover servers), and re-run the block above.
+
+**Check the seed before running.** Each operator should hold about 80-90% of 5,120 train
+and 640 test rows (some rows are lost on sqlite; that is fine for the demo). The rows are
+in partition tables, so a plain `select count(*)` returns 0. Use:
+
+```bash
+curl -s http://127.0.0.1:32149 -H "User-Agent: AnyLog/1.23" -H "command: get rows count where dbms=mydb and table=medmnist_train"
+```
+
+(operator `i` is on port `32{i}49`; operator 10 is on `33049`.)
+
+- The first `seed` downloads `bloodmnist.npz` (md5-checked) into `edgefl/data/medmnist/`,
+  then writes the PNGs to `edgefl/data/medmnist/published_images/`. Each operator gets
+  512 train and 64 test slides per round.
+- `--seed-rounds` must be at least the run's `--rounds`, or later rounds find no data.
+- The seed sends about 400 rows per second in total. The AnyLog server closes every
+  connection, so each row uses one local port and macOS holds it for ~30 s; faster than
+  ~550 rows/s runs out of ports (`Errno 49 Can't assign requested address`).
+  A full 10-round, 10-node seed takes about 2.5 minutes.
+- MNIST still needs `psql`; seeding it on sqlite is refused with a message.
+- After a `--keep-servers` run, use the GUI's **Inference** step: choose **MedMNIST**, set
+  the header Node to a node (for example `localhost:8081`), and upload a PNG from
+  `edgefl/data/medmnist/eval_images/`.
+
 ## Watch it and get results
 
 Each run writes `edgefl/harness/runs/<timestamp>_<run_id>_a<attempt>/`:
@@ -108,17 +157,45 @@ so old blockchain state doesn't carry over.
 | `ANYLOG_LICENSE has lost the quotes...` | single-quote the key in your profile (setup step 4), open a new shell |
 | `pull access denied for anylogco/anylog-network` | not logged in to the image repository (setup step 3) |
 | node `Failed to initialize node ... Response ended prematurely` | that operator is empty: check the seed (above) |
+| `operator1 has no 'mydb' database` | operators were started for another dataset: `infra-down --volumes`, then `infra-up --dataset medmnist` |
+| node `Error fetching datasets: 'Query'` | `run` used the default `mnist` dataset against MedMNIST data (or the reverse): pass the same `--dataset` everywhere |
+| seed prints thousands of `Errno 49 Can't assign requested address` | local ports exhausted by too many short connections; the publisher paces itself now, re-run `seed` |
 | `FAILED_SETUP: EdgeLake not ready` | run `infra-up` first |
 | `FAILED_PROCESS_DEATH` | open the run's `logs/` and `manifest.json` for which server died and why |
 | seed fails with `unrecognized token` in the operator error log | operators are on sqlite: set `OPERATOR_DB_TYPE = "psql"` and rebuild with `--volumes` |
 
 ## Inference
 
-The harness doesn't run inference, and its servers are gone when a run ends. To run
-inference, start the servers by hand (see `Demo-READMEs/MNIST.md`) and call
-`POST http://localhost:<node-port>/inference/<index>` on each node after training.
+The harness has no inference command, and a normal `run` stops its servers when it
+finishes. Add `--keep-servers` to leave them up after a completed run:
+
+```bash
+python -m harness run --mode cfl --nodes 5 --rounds 10 --keep-servers
+```
+
+When the run completes it prints each node's URL and a ready-made `curl`, for example
+`curl -X POST http://localhost:8081/inference/<run_id>` (the index is the run id).
+To use the GUI instead:
+
+```bash
+cd gui/edgefl-gui && npm start    # opens http://localhost:3000
+```
+
+In the GUI open **Inference** and set the top-right URL to a **node** (for example
+`http://localhost:8081`), not the aggregator at 8080.
+
+The kept servers are separate processes, not tied to the terminal: closing it won't stop
+them. They stop on **your next harness command** (any command, including `run`,
+`infra-down` or `stop`), or with `python -m harness stop`. A failed run never keeps its
+servers. With `--mode dfl`, kept nodes keep training rounds after the run completes.
 
 ## Not yet validated
 
-Bring-up, seed and the manual MNIST demo have been run on the `pre-develop` layout.
-A full `harness run` and `suite` on it have not.
+Run end to end on the `pre-develop` layout: bring-up, seed and a CFL `harness run` with
+`--keep-servers` and inference, for MNIST on Postgres (10 nodes) and for MedMNIST on
+sqlite (3 nodes, 3 rounds). Not run on it: DFL, hybrid, `suite`, MedMNIST at 10 nodes.
+
+Known issues: the license does not activate (the master logs `Wrong license key`), so
+network-wide queries fail, though training and inference do not need them. A MedMNIST
+seed can lose roughly a fifth of its train rows (AnyLog logs `JSON file name: time
+section with incorrect length`); check the row counts after seeding.
