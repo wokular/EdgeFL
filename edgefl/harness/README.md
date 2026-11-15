@@ -97,6 +97,51 @@ stack over a problem a rebuild can't fix.
 
 The default per-tier sweep lives in `tier_sweep()` in `__main__.py` — edit it there.
 
+**Seed at least as many rounds as the run's `--rounds` (`--seed-rounds`).** `seed` and
+`infra-up --seed` take `--seed-rounds N`, the number of rounds of data inserted. The default
+is the dataset's own: 10 for MedMNIST (each round adds 512 train + 64 test slides per
+operator), 20 for MNIST. A node trains round *r* on rows tagged with recent round numbers, so
+a run longer than the seed finds no rows for the later rounds: the nodes log
+`No rows yet for medmnist_train (attempt n/15)` and stall. Examples:
+
+```bash
+python -m harness seed --nodes 10 --dataset medmnist --seed-rounds 15     # for a 15-round run
+python -m harness infra-up --nodes 10 --dataset medmnist --seed --seed-rounds 15
+```
+
+Re-running `seed` inserts everything again (duplicate rows). To extend an existing MedMNIST
+seed, publish only the missing rounds with the publisher's `--first-round` (here rounds
+11-15 to 10 operators; `--samples-per-round` is 512 x operators, test is 64 x operators):
+
+```bash
+cd edgefl/data/medmnist
+python publish_medmnist_info.py 127.0.0.1:32149,127.0.0.1:32249,127.0.0.1:32349,127.0.0.1:32449,127.0.0.1:32549,127.0.0.1:32649,127.0.0.1:32749,127.0.0.1:32849,127.0.0.1:32949,127.0.0.1:33049 \
+  --db-name mydb --first-round 11 --num-rounds 15 \
+  --samples-per-round 5120 --test-samples-per-round 640
+```
+
+**`--min-params` (default: the node count).** `run --min-params N` sets how many submodels
+must be in before a round is aggregated. Left off, it equals `--nodes`, so a 10-node run
+shows `mp10` in its name and `minParams=10` in each node's startup log. It must be between 1
+and `--nodes`. The harness writes it as `MIN_PARAMS` into every node's env file.
+
+- **CFL:** the harness also sends it to the aggregator's `/start-training`, which waits for N
+  submodels per round (capped to the number of active nodes). The nodes' own `MIN_PARAMS` is
+  not used.
+- **DFL:** each node waits for N submodels of its round before aggregating, but the
+  threshold is soft. Once it has one (its own), it checks 5 more times, about 10 s, and then
+  aggregates whatever it has. `Waiting for 10 peer submodels` followed by
+  `Aggregated 1 submodels` (or 5, or 7) is therefore normal. It is not an error.
+- **Why DFL aggregates fewer than N:** a node reads its peers' submodel policies from its own
+  operator's copy of the blockchain, and that copy syncs from the master only every
+  `BLOCKCHAIN_SYNC=60 second`, much longer than the ~10 s wait. Nodes also finish a round up to
+  30-40 s apart when 10 share one machine, and nodes that start late join at the newest round,
+  so the first rounds have fewer participants. On one machine a DFL round is often far from a
+  full N-way average. `grep Aggregated logs/node*.log` in a run folder shows what each node got.
+- **Completion does not depend on it for DFL:** a DFL run ends when all nodes have published at
+  `--rounds`. A CFL run ends when at least `min(min_params, nodes)` submodels exist at the last
+  round. The suite's DFL drift variants use `nodes - 1`.
+
 ## What a Run produces
 
 `edgefl/harness/runs/<utc-timestamp>_<run_id>_a<attempt>/`:
@@ -118,10 +163,13 @@ for CFL); `first_to_last_arrival_s` + `straggling_node_id` (CFL aggregator).
 `round_accuracy` is the accuracy team's metric and appears when their inference
 call-sites are active.
 
-**DFL note:** DFL nodes never stop on their own — the harness tears down once all N
-published a submodel at `total_rounds`, but rows for a few extra rounds usually land
-in the CSV (the network keeps training during collection). Filter
-`round_number <= total_rounds` when analyzing.
+**DFL note:** the harness passes each node `TOTAL_ROUNDS` (= `--rounds`) in its env
+file, and a DFL node stops starting rounds after it publishes that round (its last
+aggregation still finishes, and the server keeps answering inference). The harness still
+decides the run is complete only once all N nodes published at `total_rounds`. Nodes are
+not in lockstep, so fast ones finish first and wait. Runs from before this change
+(or with `TOTAL_ROUNDS` unset) keep training until killed and can have rows for extra
+rounds: filter `round_number <= total_rounds`.
 
 ## How completion/failure is decided
 

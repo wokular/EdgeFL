@@ -24,9 +24,11 @@ logger = get_logger(__name__)
 ANYLOG_UA = {"User-Agent": "AnyLog/1.23"}
 
 
-def _poll(predicate, timeout_s: float, interval_s: float, label: str) -> bool:
+def _poll(predicate, timeout_s: float, interval_s: float, label: str, abort_if=None) -> bool:
     """Call predicate() until it returns True or the timeout hits. Swallows request
-    exceptions (connection refused mid-startup is expected, not fatal)."""
+    exceptions (connection refused mid-startup is expected, not fatal). abort_if() is
+    checked after each failed probe; a True return gives up at once (the thing being
+    waited for can no longer happen, so waiting out the timeout is pointless)."""
     deadline = time.time() + timeout_s
     attempt = 0
     while time.time() < deadline:
@@ -37,6 +39,9 @@ def _poll(predicate, timeout_s: float, interval_s: float, label: str) -> bool:
                 return True
         except requests.RequestException:
             pass
+        if abort_if is not None and abort_if():
+            logger.warning(f"readiness ABORT: {label} (it can no longer succeed)")
+            return False
         time.sleep(interval_s)
     logger.warning(f"readiness TIMEOUT: {label} after {timeout_s}s")
     return False
@@ -64,7 +69,8 @@ def wait_edgelake_status(
 
 
 def wait_edgelake_process(
-    rest_endpoint: str, process_name: str, timeout_s: float = 120.0, interval_s: float = 5.0
+    rest_endpoint: str, process_name: str, timeout_s: float = 120.0, interval_s: float = 5.0,
+    abort_if=None,
 ) -> bool:
     """Wait until `get processes` reports `process_name` as Running. This is the deep
     readiness signal: a half-booted node answers `get status` while its TCP/Operator
@@ -80,7 +86,8 @@ def wait_edgelake_process(
             if parts and parts[0].lower() == process_name.lower():
                 return len(parts) > 1 and parts[1].lower().startswith("running")
         return False
-    return _poll(running, timeout_s, interval_s, f"process '{process_name}' at {rest_endpoint}")
+    return _poll(running, timeout_s, interval_s, f"process '{process_name}' at {rest_endpoint}",
+                 abort_if=abort_if)
 
 
 def wait_all_http_up(urls: list[str], timeout_s: float = 60.0, interval_s: float = 1.0) -> list[str]:

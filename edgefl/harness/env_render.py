@@ -73,6 +73,8 @@ def render_node_env(
     # config (per run)
     env["AGGREGATION_MODE"] = mode
     env["MIN_PARAMS"] = str(config.min_params)
+    # DFL nodes stop themselves after this round (CFL is stopped by the aggregator).
+    env["TOTAL_ROUNDS"] = str(config.total_rounds)
     env["DRIFT_HANDLING"] = config.drift_handling.value
     env["ROUND_LAG_THRESHOLD"] = str(config.round_lag_threshold)
     env["DRIFT_THRESHOLD"] = str(config.drift_threshold)

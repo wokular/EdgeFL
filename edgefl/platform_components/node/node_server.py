@@ -534,6 +534,9 @@ def listen_for_start_round(nodeInstance, index, stop_event):
 
     benchmarker = get_benchmarker()
     round_wait_started = time.time()
+    # DFL has no aggregator to say which round is the last, so the harness passes the run
+    # length. 0 (unset) keeps the old behaviour: keep starting rounds until killed.
+    total_rounds = int(os.getenv("TOTAL_ROUNDS", "0"))
 
     logger.info(f"[{index}][Round {current_round}] Listening for start round {current_round}"
                 + (" (DFL mode)" if is_dfl else ""))
@@ -600,6 +603,14 @@ def listen_for_start_round(nodeInstance, index, stop_event):
                         )
                         agg_thread.daemon = True
                         agg_thread.start()
+
+                        if total_rounds > 0 and current_round >= total_rounds:
+                            # The aggregation thread above finishes this round on its own and
+                            # the server keeps answering inference; only the loop ends.
+                            logger.info(
+                                f"[{index}][Round {current_round}] DFL: reached TOTAL_ROUNDS="
+                                f"{total_rounds}; not starting further rounds")
+                            return
 
                     # Throttle here if we're getting too far ahead of peers.
                     _apply_pause_drift(nodeInstance, current_round, index)
@@ -686,6 +697,11 @@ def dfl_aggregate_round(nodeInstance, round_number, index):
 
                 # Publish RoundStart for next round so peers can pick it up
                 next_round = round_number + 1
+                total_rounds = int(os.getenv("TOTAL_ROUNDS", "0"))
+                if total_rounds > 0 and next_round > total_rounds:
+                    logger.info(f"[{index}][Round {round_number}] DFL: final round aggregated; "
+                                f"not publishing RoundStart for round {next_round}")
+                    return
                 nodeInstance.start_round(aggregated_params_link, next_round, index, node_type="dfl_aggregator")
                 logger.info(f"[{index}][Round {round_number}] DFL: Published RoundStart for round {next_round}")
                 return

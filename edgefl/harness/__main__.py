@@ -255,9 +255,6 @@ def cmd_run(args, host):
         return
     _ensure_ports_free(config.node_count, config.needs_central_aggregator)
     _check_operators_have_db(host, config.node_count, args.dataset)
-    if args.keep_servers and config.aggregation_mode != AggregationMode.CENTRALIZED:
-        print("note: DFL nodes never stop training on their own, so kept servers keep "
-              "running rounds (and the model keeps changing) after the run completes.")
     from .runner import run_once, run_with_retry
     if args.no_retry:
         results = [run_once(config, host, REPO_ROOT, keep_servers=args.keep_servers)]

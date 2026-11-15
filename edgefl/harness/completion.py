@@ -1,7 +1,7 @@
 """Run-completion detection: poll the blockchain ledger for per-mode done signals.
 
 No clean programmatic completion signal exists (/start-training returns immediately and
-DFL nodes never stop), so the harness polls the master's ledger — the same query surface
+DFL nodes only stop once TOTAL_ROUNDS is reached), so the harness polls the master's ledger — the same query surface
 the servers themselves use — with a per-mode predicate:
 
   CFL:    the aggregator's RoundStart reached total_rounds AND >= min_params submodels

@@ -232,6 +232,9 @@ def _operator_values(ident: NodeIdentity, logical_db: str, db_type: str, host) -
         "ANYLOG_BROKER_PORT": str(ident.edgelake_rest_port + 1),
         # one cluster per operator: cluster peers replicate data, benchmarks need shards
         "CLUSTER_NAME": f'"cluster-{name}"',
+        # the template's 60 s is longer than the ~12 s a DFL node waits for peer submodels,
+        # so a node would usually see only its own on its operator's ledger copy
+        "BLOCKCHAIN_SYNC": "5 second",
         "DEFAULT_DBMS": logical_db,
         "DB_TYPE": db_type,
     }
@@ -301,28 +304,53 @@ def _say(t0: float, msg: str) -> None:
 BOOT_TIMEOUT_S = 600.0
 
 
+def _boot_script_failed(container: str) -> bool:
+    """True once the container's deployment script has given up since its latest start.
+    The one-shot script runs `run operator ...` before the node's policy has synced from
+    the master sometimes ('Needed Policy is not available') and never retries, so the node
+    stays at 'Operator: Not declared' forever. The log line appears within seconds of the
+    failure, long before a readiness timeout would notice."""
+    started = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.StartedAt}}", container],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if not started:
+        return False
+    logs = subprocess.run(
+        ["docker", "logs", "--since", started, container], capture_output=True, text=True
+    )
+    return "Failed to execute config policy" in (logs.stdout + logs.stderr)
+
+
 def _ensure_node_healthy(
     container: str, rest_conn: str, process_name: str, timeout_s: float = BOOT_TIMEOUT_S,
-    t0: float | None = None,
+    t0: float | None = None, max_restarts: int = 2,
 ) -> None:
-    """Deep readiness with one self-heal: the node's deployment script is one-shot and
-    sometimes loses a boot-time race (TCP bind, master reachability), leaving a node
-    that answers REST but runs no TCP/Operator process. A container restart re-runs
-    the script; observed to fix it reliably. Raise if even the restart doesn't."""
-    if wait_edgelake_process(rest_conn, process_name, timeout_s=timeout_s):
-        return
-    logger.warning(
-        f"{container}: '{process_name}' process not running after {timeout_s}s; "
-        f"restarting the container once (one-shot startup script likely lost a race)"
+    """Deep readiness with self-heal: the node's deployment script is one-shot and
+    sometimes loses a boot-time race (policy not synced yet, TCP bind, master
+    reachability), leaving a node that answers REST but runs no TCP/Operator process.
+    A container restart re-runs the script; observed to fix it reliably. The wait ends
+    early when the script reports failure, so a lost race costs one reboot, not
+    `timeout_s`. Raise if the node is still unhealthy after max_restarts restarts."""
+    for restart in range(max_restarts + 1):
+        if wait_edgelake_process(
+            rest_conn, process_name, timeout_s=timeout_s,
+            abort_if=lambda: _boot_script_failed(container),
+        ):
+            return
+        if restart == max_restarts:
+            break
+        why = ("its startup script failed" if _boot_script_failed(container)
+               else f"'{process_name}' not running after {timeout_s:.0f}s")
+        logger.warning(f"{container}: {why}; restarting the container "
+                       f"({restart + 1}/{max_restarts})")
+        if t0 is not None:
+            _say(t0, f"{container}: {why}, restarting it ({restart + 1}/{max_restarts})")
+        subprocess.run(["docker", "restart", container], capture_output=True, text=True)
+    raise RuntimeError(
+        f"{container} still unhealthy after {max_restarts} restart(s) ('{process_name}' "
+        f"not running). Check its logs: docker logs {container} / REST `get error log`."
     )
-    if t0 is not None:
-        _say(t0, f"{container}: '{process_name}' not running after {timeout_s:.0f}s, restarting it once")
-    subprocess.run(["docker", "restart", container], capture_output=True, text=True)
-    if not wait_edgelake_process(rest_conn, process_name, timeout_s=timeout_s):
-        raise RuntimeError(
-            f"{container} still unhealthy after a restart ('{process_name}' not "
-            f"running). Check its logs: docker logs {container} / REST `get error log`."
-        )
 
 
 def infra_up(node_count: int, host, repo_root: str, logical_db: str = "mnist_fl") -> None:
