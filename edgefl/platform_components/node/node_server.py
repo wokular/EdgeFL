@@ -630,7 +630,6 @@ def dfl_aggregate_round(nodeInstance, round_number, index):
     local model, and publish RoundStart for the next round."""
     min_params = nodeInstance.minParams.get(index, 1)
     decoded_params = {}
-    check_chances = 5
 
     logger.info(f"[{index}][Round {round_number}] DFL: Waiting for {min_params} peer submodels")
 
@@ -669,7 +668,9 @@ def dfl_aggregate_round(nodeInstance, round_number, index):
                     index=index
                 )
 
-            if len(decoded_params) >= min_params or (decoded_params and not check_chances):
+            # Strict: hold until min_params peers have published. No give-up fallback, so a
+            # node that trains first no longer aggregates only its own submodel.
+            if len(decoded_params) >= min_params:
                 # Aggregate
                 aggregation_started = time.time()
                 aggregated_params_link = nodeInstance.aggregate_model_params(
@@ -705,12 +706,6 @@ def dfl_aggregate_round(nodeInstance, round_number, index):
                 nodeInstance.start_round(aggregated_params_link, next_round, index, node_type="dfl_aggregator")
                 logger.info(f"[{index}][Round {round_number}] DFL: Published RoundStart for round {next_round}")
                 return
-
-            if decoded_params and check_chances:
-                check_chances -= 1
-
-            if not decoded_params and not check_chances:
-                check_chances = 5
 
         except Exception as e:
             logger.error(f"[{index}][Round {round_number}] DFL aggregation error: {str(e)}")

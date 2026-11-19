@@ -198,6 +198,13 @@ def _patched_config(template_text: str, values: dict[str, str], disable: tuple =
 # can't sync with the master ("Connection refused"). OVERLAY_IP replaces the local IP, and
 # 127.0.0.1 is what the roy-local configs used.
 _OVERLAY_IP = "127.0.0.1"
+# By default each node advertises its auto-detected public IP in its policy, and the master
+# pushes ledger updates to that address. From inside Docker it is often unreachable (NAT
+# hairpin, e.g. on a home network), so every push hangs until it times out, all 6 master TCP
+# threads block, and policies stop reaching the master. OVERLAY_IP is only honoured when
+# NIC_TYPE is empty, and POLICY_BIND=true puts it in the policy's `ip` without binding the
+# listener to it, so peers reach each other on 127.0.0.1 (shared host network).
+_ADVERTISE_OVERLAY = {"NIC_TYPE": '""', "POLICY_BIND": "true"}
 
 
 def _master_values(host) -> dict[str, str]:
@@ -211,6 +218,10 @@ def _master_values(host) -> dict[str, str]:
         "ANYLOG_REST_PORT": str(rest),
         "OVERLAY_IP": _OVERLAY_IP,
         "TCP_BIND": "false",
+        **_ADVERTISE_OVERLAY,
+        # every policy an operator inserts is pushed by the master to all N operators; with
+        # the template's 6 TCP threads those pushes queue up behind each other
+        "TCP_THREADS": "32",
         # the committed master config points at a Postgres on someone's LAN
         "DB_TYPE": "sqlite",
     }
@@ -228,6 +239,7 @@ def _operator_values(ident: NodeIdentity, logical_db: str, db_type: str, host) -
         "ANYLOG_REST_PORT": str(ident.edgelake_rest_port),
         "OVERLAY_IP": _OVERLAY_IP,
         "TCP_BIND": "false",
+        **_ADVERTISE_OVERLAY,
         # host networking: every operator needs its own broker port or they collide
         "ANYLOG_BROKER_PORT": str(ident.edgelake_rest_port + 1),
         # one cluster per operator: cluster peers replicate data, benchmarks need shards

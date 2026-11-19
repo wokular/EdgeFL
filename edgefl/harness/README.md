@@ -128,16 +128,23 @@ and `--nodes`. The harness writes it as `MIN_PARAMS` into every node's env file.
 - **CFL:** the harness also sends it to the aggregator's `/start-training`, which waits for N
   submodels per round (capped to the number of active nodes). The nodes' own `MIN_PARAMS` is
   not used.
-- **DFL:** each node waits for N submodels of its round before aggregating, but the
-  threshold is soft. Once it has one (its own), it checks 5 more times, about 10 s, and then
-  aggregates whatever it has. `Waiting for 10 peer submodels` followed by
-  `Aggregated 1 submodels` (or 5, or 7) is therefore normal. It is not an error.
-- **Why DFL aggregates fewer than N:** a node reads its peers' submodel policies from its own
-  operator's copy of the blockchain, and that copy syncs from the master only every
-  `BLOCKCHAIN_SYNC=60 second`, much longer than the ~10 s wait. Nodes also finish a round up to
-  30-40 s apart when 10 share one machine, and nodes that start late join at the newest round,
-  so the first rounds have fewer participants. On one machine a DFL round is often far from a
-  full N-way average. `grep Aggregated logs/node*.log` in a run folder shows what each node got.
+- **DFL:** each node waits until N submodels of its round are in before it aggregates. There
+  is no timeout, so `Waiting for 10 peer submodels` is followed by `Aggregated 10 submodels`.
+  If a peer dies, the others wait for it until the run's no-progress timeout or process-death
+  check fails the run.
+- **Ledger sync:** a node reads its peers' submodel policies from its own operator's copy of
+  the blockchain, which syncs from the master every `BLOCKCHAIN_SYNC`. The AnyLog template
+  uses `60 second` (a policy took ~46 s to reach another operator), so the harness writes
+  `5 second` into the generated operator configs. That needs a fresh `infra-up`. Before the
+  wait was made strict, nodes gave up after ~10 s and aggregated 1-7 submodels. A 10-node,
+  5-round MedMNIST run now gives every node 10 in every round and takes ~300 s (the soft
+  threshold took ~340 s), with ~16 s between rounds spent waiting for peers. The master pushes
+  every policy to all N operators, so the harness gives the master 32 TCP threads instead of
+  the template's 6. With 6 the pushes queued up and that wait was 60-78 s per round. `grep Aggregated logs/node*.log`
+  in a run folder shows what each node got.
+- **Re-running on the same infra:** the ledger keeps the previous run's submodels under the
+  same run id, so a repeat run with the same `--rounds` is judged complete within seconds and
+  its nodes are killed mid-training. `infra-down --volumes` and `infra-up` between runs.
 - **Completion does not depend on it for DFL:** a DFL run ends when all nodes have published at
   `--rounds`. A CFL run ends when at least `min(min_params, nodes)` submodels exist at the last
   round. The suite's DFL drift variants use `nodes - 1`.
@@ -222,6 +229,7 @@ rounds: filter `round_number <= total_rounds`.
 | seed succeeds but `select count(*)` shows 0 | rows sit in partitions — query with `destination: network`, or check `get rows count where dbms = mnist_fl` (par_ tables) |
 | `operatorN has no 'mydb' database` / node `Error fetching datasets: 'Query'` | operators were started for a different dataset than the one passed to `seed`/`run`. `infra-down --volumes`, then `infra-up --dataset <same>` |
 | seed prints `Errno 49 Can't assign requested address` | local ports exhausted: the AnyLog REST server closes every connection and macOS holds each port ~30 s. The MedMNIST publisher paces itself at 400 rows/s now; re-run `seed` |
+| DFL logs show `ledger shows 0 submodels` / rounds take minutes / master has fewer policies than the operators | each node advertises its auto-detected public IP and the master pushes ledger updates there. When that address is unreachable from Docker (home networks without NAT hairpin) every push hangs and the master's TCP threads block. The harness sets `NIC_TYPE=""` and `POLICY_BIND=true` so nodes advertise `OVERLAY_IP` (127.0.0.1). Check `get connections` on a node: the TCP internal address should be 127.0.0.1, and `docker exec master` should reach it. Needs a fresh `infra-up` |
 | `FAILED_SETUP: EdgeLake not ready` from `run` | bring infra up first: `python -m harness infra-up --nodes N` |
 | run completes but CSV is thin | results settle-polling capped out; rerun collection manually via `harness.results.collect_run_csv` |
 | operators sit at Operator `Not declared`; `get error log` shows `Failed to retrieve date and time ... '-$START_DATEd'` | each container clones AnyLog's `deployment-scripts` on first boot (branch `os-dev` under roy-local), and its `set_params.al` mishandled `START_DATE`. The harness comments `START_DATE` out of the generated operator configs. If you start operators by hand, remove `START_DATE=30` from the node's `node_configs.env`. |
